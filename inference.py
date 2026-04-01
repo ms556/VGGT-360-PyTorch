@@ -43,6 +43,8 @@ def main():
     # 3. 阶段一：自适应投影 (Adaptive Projection)
     # views: (1, 12, 3, H, W) -> 8个基础视图 + 4个增强视图
     multi_views , angles_list= adaptive_proj(erp_tensor) 
+    # 移除 Batch 维度以便循环处理每个 view
+    multi_views = multi_views.squeeze(0) # 变为 (N, C, H, W)
     num_views = multi_views.shape[1]
     # 4. 阶段二：VGGT 3D 推理与增强注意力 (Enhanced Attention)
     print("Running VGGT-like 3D reasoning...")
@@ -56,8 +58,8 @@ def main():
     
     # [模拟模型输出，仅作流程跑通用]
     num_views = multi_views.shape[1]
-    pred_depths = torch.rand((1, num_views, 1, 256, 256), device=device)
-    attn_maps = torch.rand((1, num_views, 1024, 1024), device=device)
+    # pred_depths = torch.rand((1, num_views, 1, 256, 256), device=device)
+    # attn_maps = torch.rand((1, num_views, 1024, 1024), device=device)
     
     # 5. 阶段三：相关性加权 3D 校正 (Correlation-Weighted Correction)
     print("Applying Correlation-Weighted 3D Correction and blending...")

@@ -74,6 +74,13 @@ def compute_correlation_weights(attn_map, spatial_coords, sigma=0.1):
     :param sigma: 高斯核的超参数，控制局部性的衰减速度
     :return: (H, W) 形状的权重图
     """
+    # 如果包含 CLS token (假设在第0位)
+    if attn_map.shape[-1] > spatial_coords.shape[0]:
+        attn_map = attn_map[1:, 1:] # 仅保留 patch-to-patch 的注意力 [cite: 57, 60]
+    
+    # 确保归一化，因为 Sharpness 计算需要概率分布
+    attn_map = attn_map / (attn_map.sum(dim=-1, keepdim=True) + 1e-8)
+    
     N_points = attn_map.shape[-1]
     device = attn_map.device
     
