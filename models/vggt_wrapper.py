@@ -4,7 +4,7 @@ import torch
 sys.path.append('./FastVGGT')
 
 # 导入 FastVGGT 真实的构建函数 (具体导入路径需参考 eval_scannet.py 内部写法)
-from fastvggt.models import build_fastvggt 
+#from fastvggt.models import build_fastvggt 
 
 def load_fastvggt_model(weights_path, device='cuda'):
     print("Loading official FastVGGT...")
