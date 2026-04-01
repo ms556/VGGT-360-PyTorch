@@ -1,6 +1,7 @@
 from utils.projection_utils import create_erp_to_perspective_grid
 import torch
 import numpy as np
+import torch.nn.functional as F
 
 def blend_to_erp(multi_view_depths, multi_view_weights, angles_list, fov, erp_hw):
     """

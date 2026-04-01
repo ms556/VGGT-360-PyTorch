@@ -60,7 +60,7 @@ class Attention(nn.Module):
         self.rope = rope
         self.kv_group_size = kv_group_size
 
-    def forward(self, x: Tensor, pos=None, global_merging=None, structure_bias=None) -> Tensor:
+    def forward(self, x: Tensor, pos=None, global_merging=None) -> Tensor:
         merge_num = list(range(24))
 
         B, N, C = x.shape
@@ -208,14 +208,18 @@ class Attention(nn.Module):
 
             N = N_m
 
-        if structure_bias is not None:
-            # 1. 手动计算注意力分数 (Q * K^T / sqrt(d))
-            attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+            # if structure_bias is not None:
+            #     # 1. 手动计算注意力分数 (Q * K^T / sqrt(d))
+            #     attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+                
+            #     # 2. VGGT-360 核心：加上结构感知先验 log(M_s)
+            #     # 这会在缺乏结构的平坦区域施加一个极大的负数惩罚
+            #     attn_scores = attn_scores + structure_bias
             
-            # 2. VGGT-360 核心：加上结构感知先验 log(M_s)
-            # 这会在缺乏结构的平坦区域施加一个极大的负数惩罚
-            attn_scores = attn_scores + structure_bias
-            
+            my_bias = getattr(self, 'structure_bias', None) 
+            if my_bias is not None:
+                attn_scores = attn_scores + my_bias
+        
             # 3. Softmax 归一化
             attn_probs = F.softmax(attn_scores, dim=-1)
             

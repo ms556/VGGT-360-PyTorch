@@ -88,3 +88,31 @@ class AdaptiveProjection(nn.Module):
         
         # 核心修改：同时返回图像和角度列表！
         return final_views, final_angles_list
+    # 在 AdaptiveProjection 类中添加：
+    def compute_uncertainty(self, views, valid_masks, tau=1.0):
+        B, N, C, H, W = views.shape
+        uncertainty_scores = torch.zeros(B, N, device=views.device)
+        
+        # 简单的 Sobel 算子定义 (需放在 __init__ 中或直接在这里定义)
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32, device=views.device).view(1,1,3,3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32, device=views.device).view(1,1,3,3)
+        
+        for i in range(N):
+            gray_view = views[:, i].mean(dim=1, keepdim=True) 
+            grad_x = F.conv2d(gray_view, sobel_x, padding=1)
+            grad_y = F.conv2d(gray_view, sobel_y, padding=1)
+            G = torch.sqrt(grad_x**2 + grad_y**2)
+            
+            valid_G = G[valid_masks[:, i:i+1] == 1] 
+            if valid_G.numel() > 0:
+                median_G = torch.median(valid_G)
+                Z = (G - median_G) / tau
+            else:
+                Z = G
+                
+            U = torch.sigmoid(-Z)
+            view_score = (U * valid_masks[:, i:i+1]).sum() / (valid_masks[:, i:i+1].sum() + 1e-6)
+            uncertainty_scores[:, i] = view_score
+            
+        return uncertainty_scores
+    

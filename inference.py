@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import argparse
 from pathlib import Path
+import torch.nn.functional as F
 
 # 导入自定义模块
 from datasets.panorama_dataset import PanoramaDataset
@@ -45,8 +46,13 @@ def main():
     num_views = multi_views.shape[1]
     # 4. 阶段二：VGGT 3D 推理与增强注意力 (Enhanced Attention)
     print("Running VGGT-like 3D reasoning...")
-    # pred_depths: (1, 12, 1, H, W), attn_maps: 最后一层注意力矩阵
-    # pred_depths, attn_maps = vggt_model(multi_views)
+    
+    # 假设你已经计算好了置信度矩阵 M_s 并转为 log_Ms
+    # inject_enhanced_attention(vggt_model, log_Ms)
+    
+    # 真实前向传播 (FastVGGT 通常返回字典或只返回深度)
+    pred_depths = vggt_model(multi_views)
+    raw_attn_maps = vggt_model.blocks[-1].attn.saved_attn_map
     
     # [模拟模型输出，仅作流程跑通用]
     num_views = multi_views.shape[1]
@@ -55,52 +61,43 @@ def main():
     
     # 5. 阶段三：相关性加权 3D 校正 (Correlation-Weighted Correction)
     print("Applying Correlation-Weighted 3D Correction and blending...")
-    final_erp_depth = torch.zeros(erp_hw, device=device)
-    erp_weight_sum = torch.zeros(erp_hw, device=device)
     
-    # for i in range(num_views):
-    #     # 计算该视图的相关性权重
-    #     spatial_coords = get_perspective_coords(256, 256).to(device)
-    #     weight_map = compute_correlation_weights(attn_maps[:, i], spatial_coords)
-        
-    #     # 将透视图深度与权重映射回 ERP 坐标系
-    #     # mapping_grid: 用于 F.grid_sample 的网格
-    #     mapping_grid = get_erp_mapping(view_idx=i, erp_hw=erp_hw)
-        
-    #     mapped_depth = torch.nn.functional.grid_sample(pred_depths[:, i], mapping_grid)
-    #     mapped_weight = torch.nn.functional.grid_sample(weight_map.unsqueeze(1), mapping_grid)
-        
-    #     final_erp_depth += mapped_depth.squeeze() * mapped_weight.squeeze()
-    #     erp_weight_sum += mapped_weight.squeeze()
+    # 假设 FastVGGT 的 patch_size 为 14
+    patch_size = 14
+    h_feat, w_feat = 256 // patch_size, 256 // patch_size
+    spatial_coords = get_perspective_coords(h_feat, w_feat, device=device)
+    multi_view_depths_list = []
+    multi_view_weights_list = []
+    
+    # 步骤 A: 提取每个视角的深度，并计算对应的校正权重
     for i in range(num_views):
-        # 1. 获取并生成透视图 2D 坐标
-        spatial_coords = get_perspective_coords(256, 256, device=device)
+        # 1. 提取深度并加入列表，形状保持为 (1, 1, 256, 256)
+        depth_i = pred_depths[:, i:i+1]
+        multi_view_depths_list.append(depth_i)
         
-        # 2. 计算当前视图的 3D 相关性融合权重
-        weight_map = compute_correlation_weights(attn_maps[:, i], spatial_coords)
+        # 2. 获取当前视角的注意力图 (注意：这里应当是去除 CLS token 后的多头平均结果)
+        attn_map_i = attn_maps[:, i]
         
-        # 3. 获取向 ERP 贴图的几何映射网格
-        mapping_grid, valid_mask = get_erp_mapping(
-            view_idx=i, 
-            angles_list=angles_list, # 你需要维护一个所有生成视图角度的列表
-            fov=90, 
-            persp_hw=(256, 256), 
-            erp_hw=erp_hw, 
-            device=device
+        # 3. 计算 Patch 级别的权重图 (h_feat x w_feat)
+        weight_map_feat = compute_correlation_weights(attn_map_i, spatial_coords)
+        
+        # 4. 【关键】：将 Patch 级别的权重插值放大回完整的像素级别 (256x256)
+        weight_map_pixel = torch.nn.functional.interpolate(
+            weight_map_feat.unsqueeze(0).unsqueeze(0), 
+            size=(256, 256), 
+            mode='bilinear', 
+            align_corners=False
         )
+        multi_view_weights_list.append(weight_map_pixel)
         
-        # 4. 执行重采样投影 (从 Perspective 映射回 ERP)
-        mapped_depth = torch.nn.functional.grid_sample(pred_depths[:, i:i+1], mapping_grid, align_corners=False)
-        mapped_weight = torch.nn.functional.grid_sample(weight_map.unsqueeze(0).unsqueeze(0), mapping_grid, align_corners=False)
-        
-        # 5. 屏蔽由于相机背后映射带来的越界伪影
-        mapped_depth = mapped_depth * valid_mask
-        mapped_weight = mapped_weight * valid_mask
-        
-        final_erp_depth += mapped_depth.squeeze() * mapped_weight.squeeze()
-        erp_weight_sum += mapped_weight.squeeze()
-        
-    final_erp_depth = final_erp_depth / (erp_weight_sum + 1e-8)
+    # 步骤 B: 直接调用 blend_to_erp 进行全景融合投影
+    final_erp_depth = blend_to_erp(
+        multi_view_depths=multi_view_depths_list,
+        multi_view_weights=multi_view_weights_list,
+        angles_list=angles_list,
+        fov=90,
+        erp_hw=erp_hw
+    )
     
     # 6. 保存结果
     output_path = Path(args.output_dir)
