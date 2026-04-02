@@ -57,10 +57,12 @@ def main():
     inject_enhanced_attention(vggt_model, log_Ms)
       
     # 真实前向传播 (FastVGGT 通常返回字典或只返回深度)
-    pred_depths = vggt_model(multi_views)
+    outputs = vggt_model(multi_views)
     # 注意：如果 FastVGGT 返回的是字典，需要改为 pred_depths = pred_depths['depth'] 等键值
+    pred_depths = outputs["depth"].to(torch.float32)
+    pred_depths = pred_depths.squeeze(0).permute(0, 3, 1, 2)
     
-    raw_attn_maps = vggt_model.aggregator.frame_blocks[-1].attn.saved_attn_map
+    raw_attn_maps = vggt_model.aggregator.frame_blocks[-1].attn.saved_attn_map.to(torch.float32)
     
     # --- 修改 4：处理多头注意力图，将形状 (N, heads, L, L) 平均为 (N, L, L) ---
     attn_maps = raw_attn_maps.mean(dim=1)
@@ -80,7 +82,8 @@ def main():
     # 步骤 A: 提取每个视角的深度，并计算对应的校正权重
     for i in range(num_views):
         # 1. 提取深度并加入列表，形状保持为 (1, 1, 256, 256)
-        depth_i = pred_depths[:, i:i+1]
+        # 修改后：提取第 i 个视角，并保持 4D 形状 [1, 1, 252, 252]
+        depth_i = pred_depths[i:i+1]
         multi_view_depths_list.append(depth_i)
         
         # 2. 获取当前视角的注意力图 (注意：这里应当是去除 CLS token 后的多头平均结果)
@@ -112,9 +115,16 @@ def main():
     output_path.mkdir(exist_ok=True)
     save_path = output_path / f"{Path(args.img_path).stem}_depth.png"
     
+    # --- 核心修复：压缩维度并确保数值合法性 ---
+    # 1. 移除 (1, 1, H, W) 中的前两个维度，变为 (H, W)
+    depth_vis = final_erp_depth.squeeze().cpu().numpy()
     # 深度图伪彩色可视化归一化
-    depth_vis = final_erp_depth.cpu().numpy()
+    
+    # 2. 检查并处理可能的 NaN 或无穷大数值（增强鲁棒性）
+    depth_vis = np.nan_to_num(depth_vis, nan=0.0, posinf=100.0, neginf=0.0)
+    # 3. 归一化到 0-255 并转换为 uint8 类型
     depth_vis = cv2.normalize(depth_vis, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    # 4. 现在 src.dims 是 2，可以安全调用 applyColorMap
     depth_vis = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
     
     cv2.imwrite(str(save_path), depth_vis)

@@ -26,6 +26,16 @@ def blend_to_erp(multi_view_depths, multi_view_weights, angles_list, fov, erp_hw
         )
         grid = grid.unsqueeze(0) # (1, erp_h, erp_w, 2)
         
+        # --- 核心修复：确保输入深度和权重的 Batch 维度为 1 ---
+        curr_depth = multi_view_depths[i]
+        curr_weight = multi_view_weights[i]
+        
+        # 如果 Batch 维不是 1 (例如是 N)，则进行切片
+        if curr_depth.shape[0] != 1:
+            curr_depth = curr_depth[0:1]
+        if curr_weight.shape[0] != 1:
+            curr_weight = curr_weight[0:1]
+            
         # 2. 将透视图的深度和权重采样到 ERP 画布上
         mapped_depth = F.grid_sample(multi_view_depths[i], grid, mode='bilinear', align_corners=False)
         mapped_weight = F.grid_sample(multi_view_weights[i], grid, mode='bilinear', align_corners=False)
@@ -75,8 +85,9 @@ def compute_correlation_weights(attn_map, spatial_coords, sigma=0.1):
     :return: (H, W) 形状的权重图
     """
     # 如果包含 CLS token (假设在第0位)
-    if attn_map.shape[-1] > spatial_coords.shape[0]:
-        attn_map = attn_map[1:, 1:] # 仅保留 patch-to-patch 的注意力 [cite: 57, 60]
+    num_special = attn_map.shape[-1] - spatial_coords.shape[0]
+    if num_special > 0:
+        attn_map = attn_map[num_special:, num_special:]
     
     # 确保归一化，因为 Sharpness 计算需要概率分布
     attn_map = attn_map / (attn_map.sum(dim=-1, keepdim=True) + 1e-8)

@@ -308,6 +308,10 @@ class DPTHead(nn.Module):
         pos_embed = position_grid_to_embed(pos_embed, x.shape[1])
         pos_embed = pos_embed * ratio
         pos_embed = pos_embed.permute(2, 0, 1)[None].expand(x.shape[0], -1, -1, -1)
+        
+        # --- 必须补上这一行：防止 float32 的 pos_embed 导致报错 ---
+        pos_embed = pos_embed.to(x.dtype)
+        
         return x + pos_embed
 
     def scratch_forward(self, features: List[torch.Tensor]) -> torch.Tensor:

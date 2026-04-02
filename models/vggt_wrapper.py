@@ -8,9 +8,8 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 fast_vggt_path = os.path.join(os.path.dirname(current_dir), 'FastVGGT')
 if fast_vggt_path not in sys.path:
     sys.path.append(fast_vggt_path)
-
 # 正确的导入方式：指向 vggt.models.vggt 模块
-from FastVGGT.vggt.models.vggt import VGGT as build_fastvggt # 或者根据你需要选择 small/base
+from vggt.models.vggt import VGGT as build_fastvggt
 
 def load_fastvggt_model(weights_path, device='cuda'):
     print(f"Loading official FastVGGT from {weights_path}...")

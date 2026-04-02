@@ -91,7 +91,7 @@ def create_erp_to_perspective_grid(yaw, pitch, fov_deg, persp_h, persp_w, erp_h,
     R_inv = torch.inverse(Ry @ Rx)
 
     # 4. 旋转到相机坐标系
-    rays_c = torch.einsum('ij,hwj->hwi', R_inv, rays_w)
+    rays_c = torch.einsum('ij,hwj->hwi', R_inv.float(), rays_w.float())
     
     # 5. 透视投影到相机的 2D 像素平面
     # 注意：只保留相机前方 (Z > 0) 的点
