@@ -5,18 +5,19 @@ import argparse
 from pathlib import Path
 import torch.nn.functional as F
 
-# 导入自定义模块
-from datasets.panorama_dataset import PanoramaDataset
+# --- 修改 1：修正导入路径 ---
+from datasets.panorama_dataset import PanoramicDepthDataset
 from models.adaptive_projection import AdaptiveProjection
 from models.enhanced_attention import inject_enhanced_attention
-from models.model_correction import compute_correlation_weights, blend_to_erp
-from utils.projection_utils import get_perspective_coords, get_erp_mapping
+from models.model_correction import compute_correlation_weights, blend_to_erp, get_perspective_coords, compute_structure_saliency_bias
+from utils.projection_utils import get_erp_mapping
+from models.vggt_wrapper import load_fastvggt_model # 新增：导入模型封装
 
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT-360 Zero-Shot Panoramic Depth Estimation")
-    parser.add_argument("--img_path", type=str, required=True, help="Path to input ERP panorama")
+    parser.add_argument("--img_path", type=str, default="input_images", required=True, help="Path to input ERP panorama")
     parser.add_argument("--output_dir", type=str, default="outputs", help="Directory to save depth maps")
-    parser.add_argument("--vggt_weights", type=str, default="weights/vggt_pretrained.pth")
+    parser.add_argument("--vggt_weights", type=str, default="/ssd/ms/My_model/VGGT-360-PyTorch/FastVGGT/weights/model_tracker_fixed_e20.pt")
     return parser.parse_args()
 
 @torch.no_grad()
@@ -26,15 +27,14 @@ def main():
     
     # 1. 初始化模块
     print("Initializing modules...")
-    adaptive_proj = AdaptiveProjection(num_base_views=8, top_k=2).to(device)
+    adaptive_proj = AdaptiveProjection(num_base_views=8, top_k=2, persp_size=252).to(device)
     
-    # 假设这是从官方或第三方加载的原始 VGGT 模型
-    # vggt_model = build_vggt_model(checkpoint=args.vggt_weights).to(device)
-    # inject_enhanced_attention(vggt_model) # 动态注入结构感知先验
+    # --- 修改 2：正确加载模型 ---
+    
+    vggt_model = load_fastvggt_model(args.vggt_weights, device)
     
     # 2. 加载与预处理图像
     print(f"Processing panorama: {args.img_path}")
-    # 这里为了演示，直接使用 cv2 读取。实际工程中可调用 datasets 里的类
     img = cv2.imread(args.img_path) # 注意：cv2 默认读取为 BGR，转换为 RGB
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) 
     erp_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
@@ -44,29 +44,35 @@ def main():
     # views: (1, 12, 3, H, W) -> 8个基础视图 + 4个增强视图
     multi_views , angles_list= adaptive_proj(erp_tensor) 
     # 移除 Batch 维度以便循环处理每个 view
-    multi_views = multi_views.squeeze(0) # 变为 (N, C, H, W)
-    num_views = multi_views.shape[1]
-    # 4. 阶段二：VGGT 3D 推理与增强注意力 (Enhanced Attention)
-    print("Running VGGT-like 3D reasoning...")
+    multi_views = multi_views.squeeze(0).to(torch.bfloat16) # 变为 (N, C, H, W)
     
-    # 假设你已经计算好了置信度矩阵 M_s 并转为 log_Ms
-    # inject_enhanced_attention(vggt_model, log_Ms)
-    
+    num_views = multi_views.shape[0]
+    # 4. # 在 inference.py 的阶段二部分
+    print("Running VGGT-like 3D reasoning with SEA...")
+
+    # 1. 计算结构显著性偏置
+    log_Ms = compute_structure_saliency_bias(multi_views, patch_size=14)
+    log_Ms = log_Ms.to(torch.bfloat16)
+    # 2. 注入模型 
+    inject_enhanced_attention(vggt_model, log_Ms)
+      
     # 真实前向传播 (FastVGGT 通常返回字典或只返回深度)
     pred_depths = vggt_model(multi_views)
-    raw_attn_maps = vggt_model.blocks[-1].attn.saved_attn_map
+    # 注意：如果 FastVGGT 返回的是字典，需要改为 pred_depths = pred_depths['depth'] 等键值
     
-    # [模拟模型输出，仅作流程跑通用]
-    num_views = multi_views.shape[1]
-    # pred_depths = torch.rand((1, num_views, 1, 256, 256), device=device)
-    # attn_maps = torch.rand((1, num_views, 1024, 1024), device=device)
+    raw_attn_maps = vggt_model.aggregator.frame_blocks[-1].attn.saved_attn_map
+    
+    # --- 修改 4：处理多头注意力图，将形状 (N, heads, L, L) 平均为 (N, L, L) ---
+    attn_maps = raw_attn_maps.mean(dim=1)
     
     # 5. 阶段三：相关性加权 3D 校正 (Correlation-Weighted Correction)
     print("Applying Correlation-Weighted 3D Correction and blending...")
     
     # 假设 FastVGGT 的 patch_size 为 14
     patch_size = 14
-    h_feat, w_feat = 256 // patch_size, 256 // patch_size
+    persp_size = 252
+    h_feat, w_feat = persp_size // patch_size, persp_size // patch_size
+    spatial_coords = get_perspective_coords(h_feat, w_feat, device=device)
     spatial_coords = get_perspective_coords(h_feat, w_feat, device=device)
     multi_view_depths_list = []
     multi_view_weights_list = []
@@ -78,7 +84,7 @@ def main():
         multi_view_depths_list.append(depth_i)
         
         # 2. 获取当前视角的注意力图 (注意：这里应当是去除 CLS token 后的多头平均结果)
-        attn_map_i = attn_maps[:, i]
+        attn_map_i = attn_maps[i]
         
         # 3. 计算 Patch 级别的权重图 (h_feat x w_feat)
         weight_map_feat = compute_correlation_weights(attn_map_i, spatial_coords)
@@ -86,7 +92,7 @@ def main():
         # 4. 【关键】：将 Patch 级别的权重插值放大回完整的像素级别 (256x256)
         weight_map_pixel = torch.nn.functional.interpolate(
             weight_map_feat.unsqueeze(0).unsqueeze(0), 
-            size=(256, 256), 
+            size=(persp_size, persp_size), 
             mode='bilinear', 
             align_corners=False
         )
@@ -116,3 +122,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
+'''
+python inference.py \
+    --img_path /ssd/ms/My_model/VGGT-360-PyTorch/input_images/__EPszp5486MewfwSMqmSQ,37.742475,-122.404157,.jpg \
+    --vggt_weights FastVGGT/weights/model_tracker_fixed_e20.pt \
+    --output_dir ./output
+'''

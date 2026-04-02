@@ -1,21 +1,38 @@
 import sys
+import os
 import torch
-# 将拉下来的 FastVGGT 目录加入系统路径，确保能正常 import 其内部模块
-sys.path.append('./FastVGGT')
 
-# 导入 FastVGGT 真实的构建函数 (具体导入路径需参考 eval_scannet.py 内部写法)
-#from fastvggt.models import build_fastvggt 
+# 假设你的目录结构是 VGGT-360-PyTorch/FastVGGT/vggt/...
+# 将 FastVGGT 根目录加入路径
+current_dir = os.path.dirname(os.path.abspath(__file__))
+fast_vggt_path = os.path.join(os.path.dirname(current_dir), 'FastVGGT')
+if fast_vggt_path not in sys.path:
+    sys.path.append(fast_vggt_path)
+
+# 正确的导入方式：指向 vggt.models.vggt 模块
+from FastVGGT.vggt.models.vggt import VGGT as build_fastvggt # 或者根据你需要选择 small/base
 
 def load_fastvggt_model(weights_path, device='cuda'):
-    print("Loading official FastVGGT...")
+    print(f"Loading official FastVGGT from {weights_path}...")
     
-    # 核心修改点：必须传入 FastVGGT 特有的控制参数
+    # 根据 FastVGGT 的实现，通常使用构建函数实例化
     model = build_fastvggt(
-        pretrained=weights_path, 
-        merging=0,              # 核心参数：指定从哪一层开始进行 Token Merging
-        vis_attn_map=True       # 刚需参数：强制模型在前向传播时返回注意力图，否则后续无法做 3D 校正！
+        enable_depth=True,     # 确保深度预测头开启
+        enable_camera=False,   # 如果你不需要预测相机位姿，可以关闭以节省显存
+        enable_point=False, 
+        enable_track=False,
+        vis_attn_map=True,      # 【必须为True】为了后续的 Correlation-Weighted Correction
+        # --- 核心修复：显式传入 None 彻底关闭全局 Token 融合 ---
+        merging=None
     )
     
-    model = model.to(device)
+    # 加载权重
+    checkpoint = torch.load(weights_path, map_location='cpu')
+    # 获取 state_dict（适应包含额外信息的 checkpoint 字典）
+    state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
+    # 加载模型权重 (使用 strict=False 以避免未开启的 Head 报错)
+    model.load_state_dict(state_dict, strict=False)
+    
+    model = model.to(torch.bfloat16).to(device)
     model.eval()
     return model

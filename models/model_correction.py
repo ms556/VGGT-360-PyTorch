@@ -124,3 +124,32 @@ def compute_correlation_weights(attn_map, spatial_coords, sigma=0.1):
     weight_map = C_p_norm.view(h, w)
     
     return weight_map
+def compute_structure_saliency_bias(views, patch_size=14):
+    """
+    根据视角图像的梯度生成结构显著性偏置 log_Ms
+    views: (N, 3, H, W)
+    return: log_Ms (N, 1, L, L), 其中 L 是 token 数量 (如 196)
+    """
+    N, _, H, W = views.shape
+    # 1. 计算灰度图梯度
+    gray_views = views.mean(dim=1, keepdim=True)
+    # 使用 Sobel 或简单的差分计算显著性
+    grad_x = torch.abs(gray_views[:, :, :, 1:] - gray_views[:, :, :, :-1])
+    grad_y = torch.abs(gray_views[:, :, 1:, :] - gray_views[:, :, :-1, :])
+    # 简单的显著性度量
+    saliency = torch.zeros_like(gray_views)
+    saliency[:, :, :H-1, :W-1] = grad_x[:, :, :H-1, :] + grad_y[:, :, :, :W-1]
+    
+    # 2. 下采样到 Patch 级别 (H/patch_size, W/patch_size)
+    L_h, L_w = H // patch_size, W // patch_size
+    saliency_map = F.interpolate(saliency, size=(L_h, L_w), mode='bilinear')
+    saliency_vec = saliency_map.view(N, -1) # (N, L)
+    
+    # 3. 构造 Attention Bias (L, L)。这里简化为：
+    # 将显著性向量扩展为矩阵，使得显著性高的 patch 在 softmax 前获得更高的权重
+    # Ms[i, j] = saliency[j]，即所有点对显著区域的注意力都被放大
+    Ms = saliency_vec.unsqueeze(1).expand(-1, L_h * L_w, -1) 
+    
+    # 4. 取 log 并进行缩放（论文中通常作为加性偏置）
+    log_Ms = torch.log(Ms + 1e-6) 
+    return log_Ms
